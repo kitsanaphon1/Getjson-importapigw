@@ -1,23 +1,23 @@
 pipeline {
-    agent any
+  agent any
 
-    environment {
-        API_SERVER_URL = "http://172.188.16.48:8000/openapi.json"
-        APIGW_URL      = "http://20.198.251.142:5555"
-        API_NAME       = "customer-erp-new-${BUILD_NUMBER}"
-        API_VERSION    = "1.0.${BUILD_NUMBER}"
-        CRED_ID        = "apigw-admin-password"
-    }
+  environment {
+    API_SERVER_URL = "http://172.188.16.48:8000/openapi.json"
+    APIGW_URL      = "http://20.198.251.142:5555"
+    API_NAME       = "customer-erp-new-${BUILD_NUMBER}"
+    API_VERSION    = "1.0.${BUILD_NUMBER}"
+    CRED_ID        = "apigw-admin-password"
+  }
 
-    stages {
+  stages {
 
-        stage('0. Prepare CLI') {
-            steps {
-                echo "🧰 Preparing APIGW CLI wrapper..."
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
+    stage('0. Prepare CLI') {
+      steps {
+        echo "🧰 Preparing APIGW CLI wrapper..."
+        sh '''#!/usr/bin/env bash
+          set -euo pipefail
 
-                    cat > apigw-cli.sh <<'EOF'
+          cat > apigw-cli.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -35,6 +35,21 @@ need_env APIGW_URL
 need_env U
 need_env P
 
+curl_call() {
+  # พิมพ์ body + http_code แยกบรรทัดท้าย
+  curl -sS -k -w "\n%{http_code}" "$@"
+}
+
+assert_2xx() {
+  local resp="$1"
+  local http_code body
+  http_code="$(echo "$resp" | tail -n1)"
+  body="$(echo "$resp" | sed '$d')"
+
+  echo "$http_code"
+  echo "$body"
+}
+
 case "$cmd" in
   import)
     spec="${1:-swagger_spec.json}"
@@ -43,8 +58,7 @@ case "$cmd" in
     need_env API_NAME
     need_env API_VERSION
 
-    # return: JSON body to stdout
-    curl -sS -k \
+    resp="$(curl_call \
       -X POST "$APIGW_URL/rest/apigateway/apis" \
       -u "$U:$P" \
       -H "Accept: application/json" \
@@ -52,27 +66,44 @@ case "$cmd" in
       -F "apiName=$API_NAME" \
       -F "apiVersion=$API_VERSION" \
       -F "type=openapi" \
-      -F "apiType=REST"
+      -F "apiType=REST")"
+
+    http_code="$(echo "$resp" | tail -n1)"
+    body="$(echo "$resp" | sed '$d')"
+
+    if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+      echo "❌ Import failed (HTTP $http_code)" >&2
+      echo "----- Response body -----" >&2
+      echo "$body" >&2
+      echo "-------------------------" >&2
+      exit 1
+    fi
+
+    # ส่ง body (JSON) ออกไปให้ Jenkins parse
+    echo "$body"
     ;;
 
   activate)
     api_id="${1:-}"
     [[ -n "$api_id" ]] || { echo "Usage: $0 activate <api_id>" >&2; exit 2; }
 
-    curl -sS -k \
+    resp="$(curl_call \
       -X PUT "$APIGW_URL/rest/apigateway/apis/$api_id/activate" \
       -u "$U:$P" \
-      -H "Accept: application/json"
-    ;;
+      -H "Accept: application/json")"
 
-  delete)
-    api_id="${1:-}"
-    [[ -n "$api_id" ]] || { echo "Usage: $0 delete <api_id>" >&2; exit 2; }
+    http_code="$(echo "$resp" | tail -n1)"
+    body="$(echo "$resp" | sed '$d')"
 
-    curl -sS -k \
-      -X DELETE "$APIGW_URL/rest/apigateway/apis/$api_id" \
-      -u "$U:$P" \
-      -H "Accept: application/json"
+    if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+      echo "❌ Activate failed (HTTP $http_code)" >&2
+      echo "----- Response body -----" >&2
+      echo "$body" >&2
+      echo "-------------------------" >&2
+      exit 1
+    fi
+
+    echo "$body"
     ;;
 
   *)
@@ -80,11 +111,10 @@ case "$cmd" in
 Usage:
   $0 import [spec_file]
   $0 activate <api_id>
-  $0 delete <api_id>
 
 Required env:
   APIGW_URL, U, P
-Optional env (for import):
+For import:
   API_NAME, API_VERSION
 USAGE
     exit 2
@@ -92,85 +122,77 @@ USAGE
 esac
 EOF
 
-                    chmod +x apigw-cli.sh
-                '''
-            }
-        }
-
-        stage('1. Prepare Spec') {
-            steps {
-                echo "📥 Deep Cleaning Spec..."
-                sh '''#!/usr/bin/env bash
-                    set -euo pipefail
-                    curl -fsSL "$API_SERVER_URL" -o raw.json
-
-                    jq '.openapi = "3.0.0" |
-                        .info.title = "'${API_NAME}'" |
-                        .info.version = "'${API_VERSION}'" |
-                        del(.tags) | del(.info.contact) |
-                        (if .paths then .paths | map_values(map_values(
-                            (if has("summary") then .summary = "Endpoint" else . end) |
-                            (if has("description") then .description = "Desc" else . end) |
-                            del(.tags?) |
-                            (.responses | map_values(
-                                if .content."application/json".schema then
-                                    .schema = .content."application/json".schema | del(.content)
-                                else . end
-                            )) as $resp | .responses = $resp
-                        )) else . end) |
-                        (.. | select(type == "object" and has("anyOf"))) |= (
-                            if .anyOf | any(.type == "null") then
-                                . + {"nullable": true} | del(.anyOf)
-                            else . end
-                        )' raw.json > swagger_spec.json
-                '''
-            }
-        }
-
-        stage('2. Register to Gateway (CLI)') {
-            steps {
-                echo "🚀 Registering as ${API_NAME}..."
-                withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
-                    sh '''#!/usr/bin/env bash
-                        set -euo pipefail
-
-                        # เรียก CLI import (คืนค่าเป็น JSON body)
-                        body="$(APIGW_URL="$APIGW_URL" U="$U" P="$P" API_NAME="$API_NAME" API_VERSION="$API_VERSION" \
-                               ./apigw-cli.sh import swagger_spec.json)"
-
-                        # เช็คว่าได้ id จริงไหม (กันกรณี error page ไม่ใช่ JSON)
-                        api_id="$(echo "$body" | jq -er '.id')"
-
-                        echo "✅ Imported: id=$api_id"
-                        echo "$api_id" > api_id.txt
-                    '''
-                }
-            }
-        }
-
-        stage('3. Activate (CLI)') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
-                    sh '''#!/usr/bin/env bash
-                        set -euo pipefail
-                        API_ID="$(cat api_id.txt)"
-
-                        ./apigw-cli.sh activate "$API_ID" \
-                          <<< "" >/dev/null 2>&1 || true
-
-                        # เรียกแบบใส่ env ให้ชัวร์ (บาง agent ไม่ส่ง env เข้า script)
-                        APIGW_URL="$APIGW_URL" U="$U" P="$P" ./apigw-cli.sh activate "$API_ID" >/dev/null
-
-                        echo "✅ Activated Successfully"
-                    '''
-                }
-            }
-        }
+          chmod +x apigw-cli.sh
+        '''
+      }
     }
 
-    post {
-        always {
-            sh 'rm -f raw.json swagger_spec.json api_id.txt apigw-cli.sh || true'
-        }
+    stage('1. Prepare Spec') {
+      steps {
+        echo "📥 Deep Cleaning Spec..."
+        sh '''#!/usr/bin/env bash
+          set -euo pipefail
+          curl -fsSL "$API_SERVER_URL" -o raw.json
+
+          jq '.openapi = "3.0.0" |
+              .info.title = "'${API_NAME}'" |
+              .info.version = "'${API_VERSION}'" |
+              del(.tags) | del(.info.contact) |
+              (if .paths then .paths | map_values(map_values(
+                  (if has("summary") then .summary = "Endpoint" else . end) |
+                  (if has("description") then .description = "Desc" else . end) |
+                  del(.tags?) |
+                  (.responses | map_values(
+                      if .content."application/json".schema then
+                          .schema = .content."application/json".schema | del(.content)
+                      else . end
+                  )) as $resp | .responses = $resp
+              )) else . end) |
+              (.. | select(type == "object" and has("anyOf"))) |= (
+                  if .anyOf | any(.type == "null") then
+                      . + {"nullable": true} | del(.anyOf)
+                  else . end
+              )' raw.json > swagger_spec.json
+        '''
+      }
     }
+
+    stage('2. Register to Gateway (CLI)') {
+      steps {
+        echo "🚀 Registering as ${API_NAME}..."
+        withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh '''#!/usr/bin/env bash
+            set -euo pipefail
+
+            body="$(APIGW_URL="$APIGW_URL" U="$U" P="$P" API_NAME="$API_NAME" API_VERSION="$API_VERSION" \
+                   ./apigw-cli.sh import swagger_spec.json)"
+
+            # ถ้า body ไม่ใช่ JSON / ไม่มี id -> จะเห็น body ใน log เพราะ CLI พ่นแล้วตอน error
+            api_id="$(echo "$body" | jq -er '.id')"
+
+            echo "✅ Imported: id=$api_id"
+            echo "$api_id" > api_id.txt
+          '''
+        }
+      }
+    }
+
+    stage('3. Activate (CLI)') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh '''#!/usr/bin/env bash
+            set -euo pipefail
+            API_ID="$(cat api_id.txt)"
+
+            APIGW_URL="$APIGW_URL" U="$U" P="$P" ./apigw-cli.sh activate "$API_ID" >/dev/null
+            echo "✅ Activated Successfully"
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    always { sh 'rm -f raw.json swagger_spec.json api_id.txt apigw-cli.sh || true' }
+  }
 }
