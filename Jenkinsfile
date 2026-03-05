@@ -14,7 +14,7 @@ pipeline {
         
         // เรียกใช้ ID ของ Credentials ที่คุณสร้างใน Jenkins
         // โดยระบบจะแยกเป็นตัวแปร APIGW_USR และ APIGW_PSW ให้โดยอัตโนมัติ
-        APIGW_AUTH     = credentials('apigw-credentials-id') 
+        APIGW_AUTH     = credentials('apigw-admin-password') 
     }
 
     stages {
