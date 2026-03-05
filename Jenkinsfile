@@ -11,84 +11,70 @@ pipeline {
     stages {
         stage('Check Connectivity') {
             steps {
-                echo "Checking connection to API Server and Gateway..."
-                withCredentials([usernamePassword(
-                    credentialsId: 'apigw-admin-password',
-                    usernameVariable: 'APIGW_AUTH_USR',
-                    passwordVariable: 'APIGW_AUTH_PSW'
-                )]) {
-                    sh '''#!/usr/bin/env bash
-                        set -euo pipefail
-                        curl -fsSI "$API_SERVER_URL" >/dev/null
-                        curl -fsSI -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" \
-                          "$APIGW_URL/rest/apigateway/health" >/dev/null
-                    '''
+                withCredentials([usernamePassword(credentialsId: 'apigw-admin-password', usernameVariable: 'U', passwordVariable: 'P')]) {
+                    sh 'curl -fsSI "$API_SERVER_URL" >/dev/null'
+                    sh 'curl -fsSI -u "$U:$P" "$APIGW_URL/rest/apigateway/health" >/dev/null'
                 }
             }
         }
 
         stage('Extract & Patch Spec') {
             steps {
-                echo "Downloading and Patching OpenAPI Spec..."
+                echo "Downloading and Scrubbing Spec..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
-                    curl -fsSL "$API_SERVER_URL" -o swagger_spec.json
-
-                    # 1. บังคับเวอร์ชันเป็น 3.0.0
-                    # 2. อัปเดตเลขเวอร์ชันตาม Jenkins Build
-                    # 3. (สำคัญ) ลบภาษาไทยใน description ออกเพื่อป้องกัน Encoding Error บน Gateway
+                    curl -fsSL "$API_SERVER_URL" -o raw.json
+                    
+                    # 1. เปลี่ยนเป็น 3.0.0
+                    # 2. ลบภาษาไทยใน info และ tags ทั้งหมด
+                    # 3. แก้ไข anyOf [type: null] ที่เป็นปัญหาหลักของ 3.1 -> 3.0
                     jq '.openapi = "3.0.0" | 
-                        .info.version = "'${API_VERSION}'" | 
-                        .info.description = "ERP Customer Service API (Automated Build)"' \
-                        swagger_spec.json > patched_spec.json
-                    
-                    mv patched_spec.json swagger_spec.json
-                    
-                    echo "Current Spec Version:"
-                    jq -r '.openapi' swagger_spec.json
+                        .info.title = "'${API_NAME}'" |
+                        .info.description = "Automated Import" |
+                        .info.version = "'${API_VERSION}'" |
+                        del(.info.contact) |
+                        (.. | select(type == "object" and has("anyOf"))) |= (
+                            if .anyOf | any(.type == "null") then 
+                                . + {"nullable": true} | del(.anyOf) 
+                            else . end
+                        ) |
+                        del(.paths[][][].tags) |
+                        del(.tags)' raw.json > swagger_spec.json
+
+                    echo "Patched Spec (First 15 lines):"
+                    head -n 15 swagger_spec.json
                 '''
             }
         }
 
         stage('Push to IBM API Gateway') {
             steps {
-                echo "Importing API via REST API..."
-                withCredentials([usernamePassword(
-                    credentialsId: 'apigw-admin-password',
-                    usernameVariable: 'APIGW_AUTH_USR',
-                    passwordVariable: 'APIGW_AUTH_PSW'
-                )]) {
+                withCredentials([usernamePassword(credentialsId: 'apigw-admin-password', usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
-
-                        # ส่งแบบ Multipart เหมือนหน้าเว็บ Manual
-                        http_code=$(curl -sS -o resp.json -w "%{http_code}" \
+                        
+                        # เพิ่มความชัวร์ด้วยการส่งเป็นไฟล์แนบพร้อมระบุชนิดข้อมูลชัดเจน
+                        resp=$(curl -sS -w "\n%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
-                            -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" \
+                            -u "$U:$P" \
                             -H "Accept: application/json" \
                             -F "apiDefinition=@swagger_spec.json;type=application/json" \
                             -F "apiName=$API_NAME" \
                             -F "apiVersion=$API_VERSION" \
                             -F "type=openapi" \
-                            -F "apiType=REST" || true)
+                            -F "apiType=REST")
+
+                        http_code=$(echo "$resp" | tail -n1)
+                        body=$(echo "$resp" | sed '$d')
 
                         echo "HTTP Code: $http_code"
-                        cat resp.json
+                        echo "Response: $body"
 
                         if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-                            echo "API import failed (HTTP $http_code)"
                             exit 1
                         fi
-
-                        # ตรวจสอบว่าใน JSON มี Id หรือไม่
-                        API_ID=$(jq -r '.id // empty' resp.json)
-                        if [[ -z "$API_ID" ]]; then
-                            echo "Failed to get API ID from response"
-                            exit 1
-                        fi
-
-                        echo "$API_ID" > api_id.txt
-                        echo "Imported API ID: $API_ID"
+                        
+                        echo $(echo "$body" | jq -r .id) > api_id.txt
                     '''
                 }
             }
@@ -96,27 +82,12 @@ pipeline {
 
         stage('Activate API') {
             steps {
-                echo "Activating API..."
-                withCredentials([usernamePassword(
-                    credentialsId: 'apigw-admin-password',
-                    usernameVariable: 'APIGW_AUTH_USR',
-                    passwordVariable: 'APIGW_AUTH_PSW'
-                )]) {
+                withCredentials([usernamePassword(credentialsId: 'apigw-admin-password', usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
-                        set -euo pipefail
-                        if [[ -f api_id.txt ]]; then
-                            API_ID=$(cat api_id.txt)
-                            
-                            # สั่ง Activate เพื่อให้พร้อมใช้งานทันที
-                            curl -sS -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
-                                 -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" \
-                                 -H "Accept: application/json"
-                            
-                            echo "API $API_ID is now Active ✅"
-                        else
-                            echo "No API ID found, skipping activation."
-                            exit 1
-                        fi
+                        API_ID=$(cat api_id.txt)
+                        curl -sS -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
+                             -u "$U:$P" -H "Accept: application/json"
+                        echo "API $API_ID Activated ✅"
                     '''
                 }
             }
@@ -124,8 +95,6 @@ pipeline {
     }
 
     post {
-        always {
-            sh 'rm -f swagger_spec.json resp.json api_id.txt || true'
-        }
+        always { sh 'rm -f raw.json swagger_spec.json api_id.txt || true' }
     }
 }
