@@ -23,17 +23,18 @@ pipeline {
             }
         }
 
-        stage('2. Extract & Convert to Swagger 2.0') {
+        stage('2. Extract & Convert to Pure Swagger 2.0') {
             steps {
-                echo "📝 Downloading and converting spec to Swagger 2.0 (Most stable for IBM)..."
+                echo "📝 Deep Converting Spec to Swagger 2.0 (The most stable version for IBM)..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
-                    # แปลงโครงสร้างจาก 3.x เป็น 2.0 (Swagger)
-                    # - เปลี่ยน 'openapi' เป็น 'swagger: 2.0'
-                    # - ย้าย 'components/schemas' ไปที่ 'definitions'
-                    # - ล้างภาษาไทยและฟิลด์ที่ไม่จำเป็นออกทั้งหมด
+                    # แปลงโครงสร้างแบบละเอียด:
+                    # 1. เปลี่ยนเป็น Swagger 2.0 และย้าย Definitions
+                    # 2. แก้ปัญหา Response Schema (ดึงออกจาก content/application/json)
+                    # 3. จัดการ anyOf [type: null] ให้เป็นมาตรฐาน 2.0
+                    # 4. ล้างภาษาไทยและ Tags ออกทั้งหมด
                     jq '
                     .swagger = "2.0" | 
                     del(.openapi) |
@@ -50,13 +51,25 @@ pipeline {
                     (if .paths then .paths | map_values(map_values(
                         (if has("summary") then .summary = "Endpoint" else . end) |
                         (if has("description") then .description = "Description" else . end) |
-                        del(.tags?)
+                        del(.tags?) |
+                        # แก้จุดตาย: ดึง Schema ออกจากชั้น content
+                        (.responses | map_values(
+                            if .content."application/json".schema then 
+                                .schema = .content."application/json".schema | del(.content)
+                            else . end
+                        )) as $resp | .responses = $resp
                     )) else . end) |
+                    (.. | select(type == "object" and has("anyOf"))) |= (
+                        if .anyOf | any(.type == "null") then 
+                            .type = "string" | .x_nullable = true | del(.anyOf)
+                        else . end
+                    ) |
+                    (.. | select(type == "object")) |= del(.title?, .examples?) |
                     del(.tags) | del(.info.contact)
                     ' raw.json > swagger_spec.json
 
-                    echo "✅ Conversion to Swagger 2.0 completed."
-                    head -n 20 swagger_spec.json
+                    echo "✅ Conversion completed. Previewing File:"
+                    head -n 25 swagger_spec.json
                 '''
             }
         }
@@ -68,6 +81,7 @@ pipeline {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
                         
+                        # ส่งไฟล์แบบ Multipart และระบุ type=swagger
                         resp=$(curl -sS -w "\\n%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
                             -u "$U:$P" \
