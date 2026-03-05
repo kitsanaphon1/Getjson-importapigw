@@ -13,7 +13,7 @@ pipeline {
         stage('Check Connectivity') {
             steps {
                 echo "Checking connection to API Server and Gateway..."
-                sh '''
+                sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSI "$API_SERVER_URL" >/dev/null
                 '''
@@ -23,9 +23,10 @@ pipeline {
                     usernameVariable: 'APIGW_AUTH_USR',
                     passwordVariable: 'APIGW_AUTH_PSW'
                 )]) {
-                    sh '''
+                    sh '''#!/usr/bin/env bash
                         set -euo pipefail
-                        curl -fsSI -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" "$APIGW_URL/rest/apigateway/health" >/dev/null
+                        curl -fsSI -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" \
+                          "$APIGW_URL/rest/apigateway/health" >/dev/null
                     '''
                 }
             }
@@ -34,7 +35,7 @@ pipeline {
         stage('Extract OpenAPI Spec') {
             steps {
                 echo "Downloading OpenAPI Spec..."
-                sh '''
+                sh '''#!/usr/bin/env bash
                     set -euo pipefail
 
                     curl -fsSL "$API_SERVER_URL" -o swagger_spec.json
@@ -62,10 +63,9 @@ pipeline {
                     usernameVariable: 'APIGW_AUTH_USR',
                     passwordVariable: 'APIGW_AUTH_PSW'
                 )]) {
-                    sh '''
+                    sh '''#!/usr/bin/env bash
                         set -euo pipefail
 
-                        # เรียก import และเก็บทั้ง http code + response body
                         http_code=$(curl -sS -o resp.json -w "%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
                             -u "$APIGW_AUTH_USR:$APIGW_AUTH_PSW" \
@@ -80,13 +80,11 @@ pipeline {
                         echo "Response:"
                         cat resp.json || true
 
-                        # fail ถ้าไม่ใช่ 2xx
-                        if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+                        if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
                             echo "API import failed (HTTP $http_code)"
                             exit 1
                         fi
 
-                        # กันกรณี 200 แต่ใน body มี errorDetails
                         if jq -e '.errorDetails? // empty | length > 0' resp.json >/dev/null; then
                             echo "API import failed (errorDetails present)"
                             exit 1
@@ -100,14 +98,10 @@ pipeline {
     }
 
     post {
-        success {
-            echo 'Congratulations! API has been imported successfully.'
-        }
-        failure {
-            echo 'Failed! Please check API Gateway logs for detail.'
-        }
+        success { echo 'Congratulations! API has been imported successfully.' }
+        failure { echo 'Failed! Please check API Gateway logs for detail.' }
         always {
-            sh '''
+            sh '''#!/usr/bin/env bash
                 rm -f swagger_spec.json resp.json || true
             '''
         }
