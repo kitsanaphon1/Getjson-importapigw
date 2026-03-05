@@ -2,7 +2,6 @@ pipeline {
     agent any
 
     environment {
-        // --- Configuration ---
         API_SERVER_URL = "http://172.188.16.48:8000/openapi.json"
         APIGW_URL      = "http://20.198.251.142:5555"
         API_NAME       = "customer-erp-API"
@@ -26,30 +25,32 @@ pipeline {
 
         stage('2. Extract & Patch Spec') {
             steps {
-                echo "📝 Downloading and scrubbing OpenAPI spec (Fixing 3.1.0 -> 3.0.0)..."
+                echo "📝 Downloading and deep-scrubbing OpenAPI spec (Removing Thai characters)..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
-                    # 1. บังคับ 3.0.0 
-                    # 2. ล้างภาษาไทยใน description และลบ tags/contact ออกเพื่อป้องกัน 400 Bad Request
-                    # 3. แก้ไข anyOf: [type: null] ให้เป็นมาตรฐาน 3.0.0 (nullable: true)
-                    # 4. ใช้ try/catch style ของ jq เพื่อลบ tags อย่างปลอดภัย
+                    # บังคับ 3.0.0 และล้างภาษาไทยในทึกจุด (info, paths, summary, description)
+                    # แก้ไข anyOf: [type: null] เป็น nullable: true
                     jq '.openapi = "3.0.0" | 
                         .info.title = "'${API_NAME}'" |
                         .info.version = "'${API_VERSION}'" |
                         .info.description = "Automated Build via Jenkins" |
                         del(.info.contact) |
                         del(.tags) |
-                        (if .paths then .paths | map_values(map_values(del(.tags?))) else . end) |
+                        (if .paths then .paths | map_values(map_values(
+                            (if has("summary") then .summary = "Endpoint" else . end) |
+                            (if has("description") then .description = "Description" else . end) |
+                            del(.tags?)
+                        )) else . end) |
                         (.. | select(type == "object" and has("anyOf"))) |= (
                             if .anyOf | any(.type == "null") then 
                                 . + {"nullable": true} | del(.anyOf) 
                             else . end
                         )' raw.json > swagger_spec.json
 
-                    echo "✅ Patch completed. Version: ${API_VERSION}"
-                    head -n 5 swagger_spec.json
+                    echo "✅ Deep Patch completed. Thai characters removed from endpoints."
+                    head -n 20 swagger_spec.json
                 '''
             }
         }
@@ -91,7 +92,7 @@ pipeline {
 
         stage('4. Set Active') {
             steps {
-                echo "⚡ Activating API (Making it ready to use)..."
+                echo "⚡ Activating API..."
                 withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
@@ -100,7 +101,7 @@ pipeline {
                         curl -sS -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
                              -u "$U:$P" -H "Accept: application/json"
                         
-                        echo "✅ API $API_ID is now ACTIVE and ready for requests."
+                        echo "✅ API $API_ID is now ACTIVE."
                     '''
                 }
             }
