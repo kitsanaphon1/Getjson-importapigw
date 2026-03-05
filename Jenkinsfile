@@ -36,18 +36,7 @@ need_env U
 need_env P
 
 curl_call() {
-  # พิมพ์ body + http_code แยกบรรทัดท้าย
   curl -sS -k -w "\n%{http_code}" "$@"
-}
-
-assert_2xx() {
-  local resp="$1"
-  local http_code body
-  http_code="$(echo "$resp" | tail -n1)"
-  body="$(echo "$resp" | sed '$d')"
-
-  echo "$http_code"
-  echo "$body"
 }
 
 case "$cmd" in
@@ -79,7 +68,6 @@ case "$cmd" in
       exit 1
     fi
 
-    # ส่ง body (JSON) ออกไปให้ Jenkins parse
     echo "$body"
     ;;
 
@@ -107,16 +95,7 @@ case "$cmd" in
     ;;
 
   *)
-    cat >&2 <<USAGE
-Usage:
-  $0 import [spec_file]
-  $0 activate <api_id>
-
-Required env:
-  APIGW_URL, U, P
-For import:
-  API_NAME, API_VERSION
-USAGE
+    echo "Usage: $0 import [spec_file] | $0 activate <api_id>" >&2
     exit 2
     ;;
 esac
@@ -127,32 +106,49 @@ EOF
       }
     }
 
+    // ✅ แก้ Stage นี้เท่านั้น
     stage('1. Prepare Spec') {
       steps {
-        echo "📥 Deep Cleaning Spec..."
+        echo "📥 Deep Cleaning Spec (OAS3 valid)..."
         sh '''#!/usr/bin/env bash
           set -euo pipefail
           curl -fsSL "$API_SERVER_URL" -o raw.json
 
-          jq '.openapi = "3.0.0" |
-              .info.title = "'${API_NAME}'" |
-              .info.version = "'${API_VERSION}'" |
-              del(.tags) | del(.info.contact) |
-              (if .paths then .paths | map_values(map_values(
-                  (if has("summary") then .summary = "Endpoint" else . end) |
-                  (if has("description") then .description = "Desc" else . end) |
+          jq '
+            .openapi = "3.0.0" |
+            .info.title = "'${API_NAME}'" |
+            .info.version = "'${API_VERSION}'" |
+            del(.tags) |
+            del(.info.contact) |
+
+            # ทำให้ operation/response ถูกต้องตาม OAS3
+            (if .paths then
+              .paths |= map_values(
+                map_values(
+                  (if has("summary") then .summary="Endpoint" else . end) |
+                  (if has("description") then .description="Desc" else . end) |
                   del(.tags?) |
-                  (.responses | map_values(
-                      if .content."application/json".schema then
-                          .schema = .content."application/json".schema | del(.content)
-                      else . end
-                  )) as $resp | .responses = $resp
-              )) else . end) |
-              (.. | select(type == "object" and has("anyOf"))) |= (
-                  if .anyOf | any(.type == "null") then
-                      . + {"nullable": true} | del(.anyOf)
-                  else . end
-              )' raw.json > swagger_spec.json
+
+                  # response ต้องมี description (บาง gateway ซีเรียส)
+                  (if has("responses") then
+                    .responses |= map_values(
+                      (if has("description") then . else . + {"description":"OK"} end)
+                    )
+                   else . end)
+                )
+              )
+             else . end) |
+
+            # anyOf null -> nullable (OAS3.0)
+            (.. | select(type=="object" and has("anyOf"))) |= (
+              if (.anyOf | any(.type=="null")) then
+                . + {"nullable": true} | del(.anyOf)
+              else .
+              end
+            )
+          ' raw.json > swagger_spec.json
+
+          test -s swagger_spec.json
         '''
       }
     }
@@ -167,7 +163,6 @@ EOF
             body="$(APIGW_URL="$APIGW_URL" U="$U" P="$P" API_NAME="$API_NAME" API_VERSION="$API_VERSION" \
                    ./apigw-cli.sh import swagger_spec.json)"
 
-            # ถ้า body ไม่ใช่ JSON / ไม่มี id -> จะเห็น body ใน log เพราะ CLI พ่นแล้วตอน error
             api_id="$(echo "$body" | jq -er '.id')"
 
             echo "✅ Imported: id=$api_id"
