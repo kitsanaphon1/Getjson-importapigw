@@ -23,33 +23,39 @@ pipeline {
             }
         }
 
-        stage('2. Extract & Patch Spec') {
+        stage('2. Extract & Convert to Swagger 2.0') {
             steps {
-                echo "📝 Downloading and deep-scrubbing OpenAPI spec (Removing Thai characters)..."
+                echo "📝 Downloading and converting spec to Swagger 2.0 (Most stable for IBM)..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
-                    # บังคับ 3.0.0 และล้างภาษาไทยในทึกจุด (info, paths, summary, description)
-                    # แก้ไข anyOf: [type: null] เป็น nullable: true
-                    jq '.openapi = "3.0.0" | 
-                        .info.title = "'${API_NAME}'" |
-                        .info.version = "'${API_VERSION}'" |
-                        .info.description = "Automated Build via Jenkins" |
-                        del(.info.contact) |
-                        del(.tags) |
-                        (if .paths then .paths | map_values(map_values(
-                            (if has("summary") then .summary = "Endpoint" else . end) |
-                            (if has("description") then .description = "Description" else . end) |
-                            del(.tags?)
-                        )) else . end) |
-                        (.. | select(type == "object" and has("anyOf"))) |= (
-                            if .anyOf | any(.type == "null") then 
-                                . + {"nullable": true} | del(.anyOf) 
-                            else . end
-                        )' raw.json > swagger_spec.json
+                    # แปลงโครงสร้างจาก 3.x เป็น 2.0 (Swagger)
+                    # - เปลี่ยน 'openapi' เป็น 'swagger: 2.0'
+                    # - ย้าย 'components/schemas' ไปที่ 'definitions'
+                    # - ล้างภาษาไทยและฟิลด์ที่ไม่จำเป็นออกทั้งหมด
+                    jq '
+                    .swagger = "2.0" | 
+                    del(.openapi) |
+                    .info.title = "'${API_NAME}'" |
+                    .info.version = "'${API_VERSION}'" |
+                    .info.description = "Automated Swagger 2.0 Build" |
+                    .definitions = .components.schemas |
+                    del(.components) |
+                    (.. | select(type == "object" and has("$ref"))) |= (
+                        if ."$ref" | startswith("#/components/schemas/") then 
+                            ."$ref" |= sub("#/components/schemas/"; "#/definitions/") 
+                        else . end
+                    ) |
+                    (if .paths then .paths | map_values(map_values(
+                        (if has("summary") then .summary = "Endpoint" else . end) |
+                        (if has("description") then .description = "Description" else . end) |
+                        del(.tags?)
+                    )) else . end) |
+                    del(.tags) | del(.info.contact)
+                    ' raw.json > swagger_spec.json
 
-                    echo "✅ Deep Patch completed. Thai characters removed from endpoints."
+                    echo "✅ Conversion to Swagger 2.0 completed."
                     head -n 20 swagger_spec.json
                 '''
             }
@@ -57,7 +63,7 @@ pipeline {
 
         stage('3. Register to API Gateway') {
             steps {
-                echo "🚀 Registering/Updating API on IBM Gateway..."
+                echo "🚀 Registering API on IBM Gateway..."
                 withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
@@ -69,7 +75,7 @@ pipeline {
                             -F "apiDefinition=@swagger_spec.json;type=application/json" \
                             -F "apiName=$API_NAME" \
                             -F "apiVersion=$API_VERSION" \
-                            -F "type=openapi" \
+                            -F "type=swagger" \
                             -F "apiType=REST")
 
                         http_code=$(echo "$resp" | tail -n1)
@@ -97,10 +103,8 @@ pipeline {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
                         API_ID=$(cat api_id.txt)
-                        
                         curl -sS -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
                              -u "$U:$P" -H "Accept: application/json"
-                        
                         echo "✅ API $API_ID is now ACTIVE."
                     '''
                 }
@@ -109,8 +113,6 @@ pipeline {
     }
 
     post {
-        success { echo "🎉 Pipeline Finished Successfully!" }
-        failure { echo "🚨 Pipeline Failed. Please check the logs above." }
         always {
             sh 'rm -f raw.json swagger_spec.json api_id.txt || true'
         }
