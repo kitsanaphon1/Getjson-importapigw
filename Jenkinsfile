@@ -31,17 +31,17 @@ pipeline {
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
-                    # เลียนแบบความฉลาดของ GitHub Actions: 
-                    # - บังคับ 3.0.0 
-                    # - ล้างภาษาไทยใน description/tags ออกเพื่อป้องกัน 400 Bad Request
-                    # - แก้ไข schema nullability ให้ Gateway อ่านออก
+                    # 1. บังคับ 3.0.0 
+                    # 2. ล้างภาษาไทยใน description และลบ tags/contact ออกเพื่อป้องกัน 400 Bad Request
+                    # 3. แก้ไข anyOf: [type: null] ให้เป็นมาตรฐาน 3.0.0 (nullable: true)
+                    # 4. ใช้ try/catch style ของ jq เพื่อลบ tags อย่างปลอดภัย
                     jq '.openapi = "3.0.0" | 
                         .info.title = "'${API_NAME}'" |
                         .info.version = "'${API_VERSION}'" |
-                        .info.description = "Automated build via Jenkins" |
+                        .info.description = "Automated Build via Jenkins" |
                         del(.info.contact) |
                         del(.tags) |
-                        del(.paths[][][].tags) |
+                        (if .paths then .paths | map_values(map_values(del(.tags?))) else . end) |
                         (.. | select(type == "object" and has("anyOf"))) |= (
                             if .anyOf | any(.type == "null") then 
                                 . + {"nullable": true} | del(.anyOf) 
@@ -49,6 +49,7 @@ pipeline {
                         )' raw.json > swagger_spec.json
 
                     echo "✅ Patch completed. Version: ${API_VERSION}"
+                    head -n 5 swagger_spec.json
                 '''
             }
         }
@@ -60,7 +61,6 @@ pipeline {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
                         
-                        # ใช้ Multipart Form เหมือนการลากไฟล์วางหน้าเว็บ (Manual)
                         resp=$(curl -sS -w "\\n%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
                             -u "$U:$P" \
@@ -81,7 +81,6 @@ pipeline {
                             exit 1
                         fi
                         
-                        # ดึง API ID ออกมาใช้ในขั้นตอน Activate
                         API_ID=$(echo "$body" | jq -r .id)
                         echo "$API_ID" > api_id.txt
                         echo "✅ Registered Success! API ID: $API_ID"
@@ -98,7 +97,6 @@ pipeline {
                         set -euo pipefail
                         API_ID=$(cat api_id.txt)
                         
-                        # สั่ง Activate ทันที เลียนแบบ set-active: true
                         curl -sS -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
                              -u "$U:$P" -H "Accept: application/json"
                         
@@ -110,12 +108,8 @@ pipeline {
     }
 
     post {
-        success {
-            echo "🎉 Pipeline Finished Successfully!"
-        }
-        failure {
-            echo "🚨 Pipeline Failed. Please check the logs above."
-        }
+        success { echo "🎉 Pipeline Finished Successfully!" }
+        failure { echo "🚨 Pipeline Failed. Please check the logs above." }
         always {
             sh 'rm -f raw.json swagger_spec.json api_id.txt || true'
         }
