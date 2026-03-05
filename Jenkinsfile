@@ -12,30 +12,44 @@ pipeline {
     stages {
         stage('1. Prepare Spec') {
             steps {
-                echo "📥 Downloading Spec..."
+                echo "📥 Downloading and Cleaning Spec for webMethods..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
-                    # แก้แค่ Version ให้ตรงกับ Jenkins Build (เพื่อให้ Manual สวยงาม)
-                    jq '.info.version = "'${API_VERSION}'"' raw.json > swagger_spec.json
+                    # 1. บังคับเป็น OpenAPI 3.0.0 (เพราะ 3.1.0 มักจะทำ API พังผ่าน REST)
+                    # 2. แก้ปัญหา anyOf: [type: null] เป็น nullable: true (จุดที่ Manual ผ่านแต่ curl มักไม่ผ่าน)
+                    # 3. ลบภาษาไทยใน info และ tags ออกทั้งหมดเพื่อป้องกันปัญหา Encoding
+                    jq '.openapi = "3.0.0" | 
+                        .info.title = "'${API_NAME}'" |
+                        .info.version = "'${API_VERSION}'" |
+                        .info.description = "Automated Import" |
+                        del(.info.contact) |
+                        del(.tags) |
+                        (if .paths then .paths | map_values(map_values(del(.tags?))) else . end) |
+                        (.. | select(type == "object" and has("anyOf"))) |= (
+                            if .anyOf | any(.type == "null") then 
+                                . + {"nullable": true} | del(.anyOf) 
+                            else . end
+                        )' raw.json > swagger_spec.json
                 '''
             }
         }
 
         stage('2. Register to Gateway') {
             steps {
-                echo "🚀 Uploading like Manual Import..."
+                echo "🚀 Uploading Spec..."
                 withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
                         
-                        # ใช้ -F แบบระบุ Type ชัดเจนที่สุด เลียนแบบ Browser
+                        # เพิ่ม -H "Expect:" และระบุ charset=utf-8 เพื่อเลียนแบบ Browser
                         resp=$(curl -sS -k -w "\\n%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
                             -u "$U:$P" \
                             -H "Accept: application/json" \
-                            -F "apiDefinition=@swagger_spec.json;type=application/json" \
+                            -H "Expect:" \
+                            -F "apiDefinition=@swagger_spec.json;type=application/json;charset=utf-8" \
                             -F "apiName=$API_NAME" \
                             -F "apiVersion=$API_VERSION" \
                             -F "type=openapi" \
@@ -61,12 +75,14 @@ pipeline {
 
         stage('3. Set Active') {
             steps {
+                echo "⚡ Activating API..."
                 withCredentials([usernamePassword(credentialsId: env.CRED_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
                     sh '''#!/usr/bin/env bash
+                        set -euo pipefail
                         API_ID=$(cat api_id.txt)
                         curl -sS -k -X PUT "$APIGW_URL/rest/apigateway/apis/$API_ID/activate" \
                              -u "$U:$P" -H "Accept: application/json"
-                        echo "✅ API is now Active"
+                        echo "✅ API is now ACTIVE"
                     '''
                 }
             }
