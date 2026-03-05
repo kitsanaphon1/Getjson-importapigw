@@ -25,15 +25,15 @@ pipeline {
 
         stage('2. Extract & Convert to Pure Swagger 2.0') {
             steps {
-                echo "📝 Deep Converting Spec to Swagger 2.0 (The most stable version for IBM)..."
+                echo "📝 Converting Spec to Pure Swagger 2.0 (Handling requestBody & Responses)..."
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
                     curl -fsSL "$API_SERVER_URL" -o raw.json
                     
                     # แปลงโครงสร้างแบบละเอียด:
                     # 1. เปลี่ยนเป็น Swagger 2.0 และย้าย Definitions
-                    # 2. แก้ปัญหา Response Schema (ดึงออกจาก content/application/json)
-                    # 3. จัดการ anyOf [type: null] ให้เป็นมาตรฐาน 2.0
+                    # 2. แก้ปัญหา Response Schema (ดึงออกจาก content)
+                    # 3. แก้ปัญหา requestBody (แปลงเป็น parameters + in: body)
                     # 4. ล้างภาษาไทยและ Tags ออกทั้งหมด
                     jq '
                     .swagger = "2.0" | 
@@ -43,22 +43,39 @@ pipeline {
                     .info.description = "Automated Swagger 2.0 Build" |
                     .definitions = .components.schemas |
                     del(.components) |
+                    
+                    # แก้ไข Reference ให้ชี้ไป definitions
                     (.. | select(type == "object" and has("$ref"))) |= (
                         if ."$ref" | startswith("#/components/schemas/") then 
                             ."$ref" |= sub("#/components/schemas/"; "#/definitions/") 
                         else . end
                     ) |
+                    
+                    # แก้ไข Paths: จัดการทั้ง Responses และ requestBody
                     (if .paths then .paths | map_values(map_values(
                         (if has("summary") then .summary = "Endpoint" else . end) |
                         (if has("description") then .description = "Description" else . end) |
                         del(.tags?) |
-                        # แก้จุดตาย: ดึง Schema ออกจากชั้น content
+                        
+                        # จัดการ Responses (ดึง schema ออกจาก content)
                         (.responses | map_values(
                             if .content."application/json".schema then 
                                 .schema = .content."application/json".schema | del(.content)
                             else . end
-                        )) as $resp | .responses = $resp
+                        )) as $resp | .responses = $resp |
+                        
+                        # จัดการ requestBody (เปลี่ยนเป็น parameters แบบ body ตามมาตรฐาน 2.0)
+                        if .requestBody then
+                            .parameters = [{
+                                "in": "body",
+                                "name": "body",
+                                "required": true,
+                                "schema": .requestBody.content."application/json".schema
+                            }] | del(.requestBody)
+                        else . end
                     )) else . end) |
+                    
+                    # ล้าง anyOf [null] และ title/examples
                     (.. | select(type == "object" and has("anyOf"))) |= (
                         if .anyOf | any(.type == "null") then 
                             .type = "string" | .x_nullable = true | del(.anyOf)
@@ -68,8 +85,8 @@ pipeline {
                     del(.tags) | del(.info.contact)
                     ' raw.json > swagger_spec.json
 
-                    echo "✅ Conversion completed. Previewing File:"
-                    head -n 25 swagger_spec.json
+                    echo "✅ Deep Conversion to Swagger 2.0 completed."
+                    head -n 30 swagger_spec.json
                 '''
             }
         }
@@ -81,7 +98,6 @@ pipeline {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
                         
-                        # ส่งไฟล์แบบ Multipart และระบุ type=swagger
                         resp=$(curl -sS -w "\\n%{http_code}" \
                             -X POST "$APIGW_URL/rest/apigateway/apis" \
                             -u "$U:$P" \
