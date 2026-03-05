@@ -2,63 +2,57 @@ pipeline {
     agent any
 
     environment {
-        // Source API Server
+        // Source: ดึงจาก FastAPI ของคุณ
         API_SERVER_URL = "http://172.188.16.48:8000/openapi.json"
         
-        // Target IBM API Gateway
+        // Target: IBM API Gateway (ตรวจสอบ Port ให้ชัวร์ ปกติ 5555 คือ Management Port)
         APIGW_URL      = "http://20.198.251.142:5555" 
         
-        // API Info
-        API_NAME       = "customer-erp-API"
-        API_VERSION    = "1.0.${BUILD_NUMBER}"
-        
-        // 1. ตรวจสอบว่า ID 'apigw-admin-password' ตรงกับใน Jenkins Credentials หรือไม่
+        // Credentials ID จาก Jenkins
         APIGW_AUTH     = credentials('apigw-admin-password') 
-        
-        // 2. ระบุ Full Path ของ apigw-cli (แก้ให้ตรงกับที่วางไว้ในเครื่อง Jenkins)
-        // เช่น /opt/SoftwareAG/common/lib/cli/bin/apigw-cli
-        CLI_PATH       = "/usr/local/bin/apigw-cli" 
     }
 
     stages {
         stage('Check Connectivity') {
             steps {
-                echo "Checking connection to API Server..."
+                echo "Checking connection to API Server and Gateway..."
                 sh "curl -I ${API_SERVER_URL}"
+                sh "curl -I ${APIGW_URL}/rest/apigateway/health" // เช็คว่า Gateway พร้อมรับแขกไหม
             }
         }
 
         stage('Extract OpenAPI Spec') {
             steps {
-                echo "Downloading OpenAPI Spec from FastAPI..."
+                echo "Downloading OpenAPI Spec..."
                 sh "curl -s ${API_SERVER_URL} > swagger_spec.json"
                 
+                // ตรวจสอบความสมบูรณ์ของไฟล์
                 sh "ls -lh swagger_spec.json"
-                sh "grep 'openapi' swagger_spec.json || (echo 'Error: Invalid OpenAPI file' && exit 1)"
+                sh "grep 'openapi' swagger_spec.json"
             }
         }
 
-        stage('Push to IBM API Gateway') {
+        stage('Push to IBM API Gateway (POST)') {
             steps {
-                echo "Importing API to IBM webMethods API Gateway..."
-                // ใช้ตัวแปรที่ Jenkins เจนให้คือ _USR และ _PSW
+                echo "Importing API via REST API POST..."
+                /* ใช้ API ของ webMethods เพื่อ Import:
+                   -u คือ Username:Password
+                   -d @swagger_spec.json คือการส่งไฟล์ไปใน Body
+                */
                 sh """
-                ${CLI_PATH} import -f swagger_spec.json \
-                    -u ${APIGW_AUTH_USR} \
-                    -p ${APIGW_AUTH_PSW} \
-                    -url ${APIGW_URL} \
-                    -name "${API_NAME}" \
-                    -v "${API_VERSION}"
+                curl -X POST "${APIGW_URL}/rest/apigateway/apis" \
+                    -u "${APIGW_AUTH_USR}:${APIGW_AUTH_PSW}" \
+                    -H "Content-Type: application/json" \
+                    -d @swagger_spec.json
                 """
             }
         }
     }
 
     post {
-        success { echo 'Done! API has been updated on IBM Gateway.' }
-        failure { echo 'Failed! Please check apigw-cli path or network connectivity.' }
+        success { echo 'Done! API updated via REST API.' }
+        failure { echo 'Failed! Check network or API Gateway Logs.' }
         always {
-            // ป้องกัน Error หากไฟล์ไม่มีอยู่จริง
             sh "rm -f swagger_spec.json || true"
         }
     }
