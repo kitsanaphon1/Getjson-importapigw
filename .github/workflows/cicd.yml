@@ -18,7 +18,7 @@ jobs:
       # ขั้นตอนที่ 1: ไปดึง Spec จาก FastAPI Server ของคุณ
       - name: Fetch OpenAPI Spec from FastAPI
         run: |
-          curl -s http://4.145.84.67:8000/openapi.json -o swagger.json
+          curl -s http://4.145.84.67:8003/openapi.json -o swagger.json
           # ตรวจสอบว่าได้ไฟล์มาจริงไหม
           ls -l swagger.json
 
