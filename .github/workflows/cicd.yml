@@ -37,7 +37,7 @@ jobs:
       - name: Apply Policy Template
         if: success()
         run: |
-          # 1. ดึง ID มาจาก Step ที่แล้ว (ถ้าไม่มี id ใน step บน บรรทัดนี้จะว่างเปล่า)
+          # 1. ดึง ID มาจาก Step ที่แล้ว
           API_ID="${{ steps.register-api.outputs.api-id }}"
           
           if [ -z "$API_ID" ] || [ "$API_ID" == "null" ]; then
@@ -47,23 +47,36 @@ jobs:
           
           echo "✅ Applying Policy to API ID: $API_ID"
           
-          # 2. ดึงข้อมูล API ปัจจุบันออกมา
+          # 2. ค้นหา Internal ID ของ Policy_1 จาก Gateway
+          echo "🔍 Looking up internal ID for 'Policy_1'..."
+          POLICY_RES=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            -H "Accept: application/json" \
+            "http://20.198.251.142:5555/rest/apigateway/policyTemplates")
+            
+          POLICY_ID=$(echo "$POLICY_RES" | jq -r '.policyTemplates[] | select(.name=="Policy_1") | .id')
+          
+          if [ -z "$POLICY_ID" ] || [ "$POLICY_ID" == "null" ]; then
+            echo "❌ Error: Policy ID not found for 'Policy_1'. Check if the name exists on Gateway."
+            exit 1
+          fi
+          echo "✅ Found Policy ID: $POLICY_ID"
+          
+          # 3. ดึงข้อมูล API ปัจจุบันออกมา
           API_JSON=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
             -H "Accept: application/json" \
             "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
             
-          # ตรวจสอบว่า Response ที่ได้มาเป็น JSON ที่ถูกต้องหรือไม่ (ดักทาง error jq)
           if ! echo "$API_JSON" | jq . >/dev/null 2>&1; then
             echo "❌ Error: API Gateway returned non-JSON response."
             echo "Raw Response: $API_JSON"
             exit 1
           fi
 
-          # 3. ยัด Policy Template เข้าไปใน JSON ก้อนเดิม
-          UPDATED_JSON=$(echo "$API_JSON" | jq '.policyTemplates = (.policyTemplates // []) + [{"id": "Policy_1"}]')
+          # 4. แทรก Policy Template ID เข้าไปในตำแหน่ง .api.policyTemplates
+          UPDATED_JSON=$(echo "$API_JSON" | jq --arg pid "$POLICY_ID" '.api.policyTemplates = (.api.policyTemplates // []) + [{"id": $pid}]')
           
-          # 4. อัปเดตกลับไปที่ Gateway
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+          # 5. อัปเดตกลับไปที่ Gateway
+          HTTP_STATUS=$(curl -s -o put_response.json -w "%{http_code}" -X PUT \
             -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
@@ -74,5 +87,7 @@ jobs:
             echo "🎉 Policy Applied Successfully! (HTTP $HTTP_STATUS)"
           else
             echo "❌ Failed to Apply Policy. HTTP Status: $HTTP_STATUS"
+            echo "🔍 Error Details from Gateway:"
+            cat put_response.json | jq . || cat put_response.json
             exit 1
           fi
