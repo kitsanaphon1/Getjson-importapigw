@@ -18,7 +18,7 @@ jobs:
 
       - name: Fetch OpenAPI Spec from FastAPI
         run: |
-          curl -s https://petstore.swagger.io/v2/swagger.json -o swagger.json
+          curl -fsSL https://petstore.swagger.io/v2/swagger.json -o swagger.json
           ls -l swagger.json
 
       - name: Register API to IBM APIGW
@@ -32,23 +32,15 @@ jobs:
           set-active: true
           debug: true
 
-      # ขั้นตอนใหม่: apply policy template "Policy_1"
-      - name: Apply policy template Policy_1
+      - name: Show registered API info
         run: |
           echo "API ID = ${{ steps.register-api.outputs.api-id }}"
+          echo "Policy template target = Policy_1"
 
-          # ตัวอย่างแนวทาง:
-          # 1) หา policy template id จากชื่อ Policy_1
-          # 2) apply template ให้กับ api-id ที่เพิ่ง register
-          #
-          # NOTE:
-          # endpoint และ payload อาจต่างกันตาม version ของ webMethods API Gateway
-          # ต้องอิง REST API ของ instance ที่คุณใช้อยู่
-
-          curl -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${{ steps.register-api.outputs.api-id }}/policytemplates/apply" \
-            -d '{
-              "policyTemplateName": "Policy_1"
-            }'
+      # ยังไม่ apply template อัตโนมัติ เพราะ endpoint ที่ถูกต้องของ instance นี้
+      # ยังไม่ได้ยืนยันจาก official doc/API spec
+      # ถ้าใส่ endpoint เดาผิด จะโดนตีความเป็น create API และ fail เหมือนเดิม
+      - name: Skip policy template apply for now
+        run: |
+          echo "Skipped auto-apply policy template Policy_1"
+          echo "Reason: official apply-template REST endpoint for this APIGW instance/version is not yet confirmed"
