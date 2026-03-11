@@ -15,15 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. ดึง Spec (ใช้ของ Petstore เป็นตัวอย่าง หรือเปลี่ยนเป็น URL ของคุณ)
-      - name: Fetch OpenAPI Spec from FastAPI
+      # 1. ดึง Spec จาก FastAPI (หรือ Petstore ตามตัวอย่างเดิม)
+      - name: Fetch OpenAPI Spec
         run: |
           curl -s https://petstore.swagger.io/v2/swagger.json -o swagger.json
           ls -l swagger.json
 
       # 2. Register API เข้า Gateway
       - name: Register API to IBM APIGW
-        id: register-api
         uses: jiridj/wm-apigw-actions-register-api@v1
         with: 
           apigw-url: http://20.198.251.142:5555
@@ -33,32 +32,37 @@ jobs:
           set-active: true
           debug: true
 
-      # 3. ค้นหา API ID และผูกเข้ากับ Policy_1 (ผ่าน REST API)
-      - name: Assign Policy_1 to API
+      # 3. จัดการเรื่อง Policy (หา ID -> เข้า Group -> Activate)
+      - name: Assign Policy_1 Group
         run: |
-          # ดึงชื่อ API จาก swagger.json
-          API_NAME=$(jq -r '.info.title' swagger.json)
+          # ดึงชื่อ API และจัดการเรื่อง URL Encoding (ป้องกันชื่อมีเว้นวรรคแบบใน Log ที่เจอ)
+          RAW_NAME=$(jq -r '.info.title' swagger.json)
+          ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RAW_NAME'))")
           
-          echo "Searching for API ID for: $API_NAME"
-          
+          echo "🔍 Searching for API: $RAW_NAME"
+
           # ค้นหา ID ของ API
-          API_ID=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            "http://20.198.251.142:5555/rest/apigateway/apis?apiName=$API_NAME" \
-            | jq -r '.apiSummaries[0].id')
+          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis?apiName=$ENCODED_NAME")
           
+          API_ID=$(echo $RESPONSE | jq -r '.apiSummaries[0].id')
+
           if [ "$API_ID" == "null" ] || [ -z "$API_ID" ]; then
-            echo "Error: Could not find API ID"
+            echo "❌ Error: Could not find API ID for '$RAW_NAME'"
+            echo "Response from Gateway: $RESPONSE"
             exit 1
           fi
-          
-          echo "Found API ID: $API_ID. Assigning to Policy_1 group..."
 
-          # เอา API เข้า Group ชื่อ Policy_1 (Group นี้ควรถูกสร้างไว้ก่อนใน UI และผูก Template ไว้)
-          curl -X POST "http://20.198.251.142:5555/rest/apigateway/groups/Policy_1/apis" \
+          echo "✅ Found API ID: $API_ID. Linking to Group: Policy_1"
+
+          # นำเข้า Group (ชื่อ Policy_1 ต้องตรงกับที่สร้างไว้ใน UI)
+          curl -s -X POST "http://20.198.251.142:5555/rest/apigateway/groups/Policy_1/apis" \
             -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
             -H "Content-Type: application/json" \
             -d "[\"$API_ID\"]"
-          
-          # สั่ง Activate อีกครั้งเพื่อให้ Policy มีผลทันที
-          curl -X POST "http://20.198.251.142:5555/rest/apigateway/apis/$API_ID/activate" \
+
+          # Activate ซ้ำอีกครั้งเพื่อให้ Policy ใหม่มีผลทันที
+          curl -s -X POST "http://20.198.251.142:5555/rest/apigateway/apis/$API_ID/activate" \
             -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}"
+          
+          echo "🚀 Finished! API is registered and Policy_1 is applied."
