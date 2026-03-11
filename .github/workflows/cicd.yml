@@ -53,10 +53,13 @@ jobs:
             -H "Accept: application/json" \
             "http://20.198.251.142:5555/rest/apigateway/policyTemplates")
             
-          POLICY_ID=$(echo "$POLICY_RES" | jq -r '.policyTemplates[] | select(.name=="Policy_1") | .id')
+          # 🚀 ใช้ jq แบบ Deep Search ควานหา .name == "Policy_1" ในทุกระดับชั้นของ JSON
+          POLICY_ID=$(echo "$POLICY_RES" | jq -r '.. | objects | select(.name? == "Policy_1") | .id' | grep -v "null" | head -n 1)
           
-          if [ -z "$POLICY_ID" ] || [ "$POLICY_ID" == "null" ]; then
-            echo "❌ Error: Policy ID not found for 'Policy_1'. Check if the name exists on Gateway."
+          if [ -z "$POLICY_ID" ]; then
+            echo "❌ Error: Policy ID not found for 'Policy_1'."
+            echo "--- 🔍 นี่คือข้อมูลทั้งหมดที่ API Gateway ตอบกลับมา (ดูกันชัดๆ ว่ามี Policy_1 อยู่ไหม) ---"
+            echo "$POLICY_RES" | jq . || echo "$POLICY_RES"
             exit 1
           fi
           echo "✅ Found Policy ID: $POLICY_ID"
