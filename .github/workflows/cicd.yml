@@ -43,24 +43,22 @@ jobs:
         if: success()
         run: |
           API_ID="${{ steps.register-api.outputs.api-id }}"
-          echo "Applying Policy: ${{ env.POLICY_TEMPLATE_ID }} to API ID: $API_ID"
+          echo "Applying Policy to API ID: $API_ID"
           
-          # ส่ง Request พร้อมตรวจสอบ HTTP Status Code (-w %{http_code})
-          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -X PUT \
+          # 1. ดึงข้อมูล API ปัจจุบันทั้งหมดออกมาก่อน
+          API_JSON=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
+          
+          # 2. ใช้ jq เพื่อแทรก Policy Template เข้าไปใน Payload
+          # (หมายเหตุ: ชื่อฟิลด์ .policyTemplates อาจต้องปรับเปลี่ยนตามโครงสร้าง JSON ของ Gateway เวอร์ชั่นที่คุณใช้)
+          UPDATED_JSON=$(echo "$API_JSON" | jq '.policyTemplates += [{"id": "Policy_1"}]')
+          
+          # 3. อัปเดต API ด้วย Payload ตัวใหม่ที่ฝัง Policy ลงไปแล้ว
+          curl -i -X PUT \
+            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
             -H "Content-Type: application/json" \
-            -d "{\"templateId\": \"${{ env.POLICY_TEMPLATE_ID }}\"}" \
-            -w "|%{http_code}" \
-            "${{ env.APIGW_BASE_URL }}/apis/${API_ID}/policy-templates")
-
-          HTTP_STATUS=$(echo "$RESPONSE" | awk -F'|' '{print $2}')
-          
-          if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "201" ]]; then
-            echo "❌ Failed to apply policy. Status: $HTTP_STATUS"
-            echo "Response: $RESPONSE"
-            exit 1
-          fi
-          echo "✅ Policy applied successfully."
+            -d "$UPDATED_JSON" \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}"
 
       - name: Verify API Status & Health
         if: success()
