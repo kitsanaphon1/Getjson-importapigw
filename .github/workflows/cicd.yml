@@ -15,15 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ขั้นตอนที่ 1: ไปดึง Spec จาก FastAPI Server ของคุณ
+      # 1. ดึง Spec (ใช้ของ Petstore เป็นตัวอย่าง หรือเปลี่ยนเป็น URL ของคุณ)
       - name: Fetch OpenAPI Spec from FastAPI
         run: |
           curl -s https://petstore.swagger.io/v2/swagger.json -o swagger.json
-          # ตรวจสอบว่าได้ไฟล์มาจริงไหม
           ls -l swagger.json
 
-      # ขั้นตอนที่ 2: Import เข้า IBM API Gateway บน Azure
+      # 2. Register API เข้า Gateway
       - name: Register API to IBM APIGW
+        id: register-api
         uses: jiridj/wm-apigw-actions-register-api@v1
         with: 
           apigw-url: http://20.198.251.142:5555
@@ -32,3 +32,33 @@ jobs:
           api-spec: swagger.json
           set-active: true
           debug: true
+
+      # 3. ค้นหา API ID และผูกเข้ากับ Policy_1 (ผ่าน REST API)
+      - name: Assign Policy_1 to API
+        run: |
+          # ดึงชื่อ API จาก swagger.json
+          API_NAME=$(jq -r '.info.title' swagger.json)
+          
+          echo "Searching for API ID for: $API_NAME"
+          
+          # ค้นหา ID ของ API
+          API_ID=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis?apiName=$API_NAME" \
+            | jq -r '.apiSummaries[0].id')
+          
+          if [ "$API_ID" == "null" ] || [ -z "$API_ID" ]; then
+            echo "Error: Could not find API ID"
+            exit 1
+          fi
+          
+          echo "Found API ID: $API_ID. Assigning to Policy_1 group..."
+
+          # เอา API เข้า Group ชื่อ Policy_1 (Group นี้ควรถูกสร้างไว้ก่อนใน UI และผูก Template ไว้)
+          curl -X POST "http://20.198.251.142:5555/rest/apigateway/groups/Policy_1/apis" \
+            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "[\"$API_ID\"]"
+          
+          # สั่ง Activate อีกครั้งเพื่อให้ Policy มีผลทันที
+          curl -X POST "http://20.198.251.142:5555/rest/apigateway/apis/$API_ID/activate" \
+            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}"
