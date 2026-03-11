@@ -1,4 +1,4 @@
-name: cicd
+name: CI/CD - Register API to IBM APIGW
 
 on:
   push:
@@ -7,25 +7,32 @@ on:
     tags:
       - 'v*'
 
+env:
+  # ตั้งค่าตัวแปรกลางที่นี่ เพื่อให้ง่ายต่อการแก้ไข
+  APIGW_BASE_URL: "http://20.198.251.142:5555/rest/apigateway"
+  POLICY_TEMPLATE_ID: "Policy_1"
+
 jobs:
-  update-dev:
+  update-api:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # รันเมื่อมีการ Push เข้า main หรือมีการสร้าง Tag v*
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     environment: development
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Fetch OpenAPI Spec
         run: |
-          # เปลี่ยนเป็น URL ของ FastAPI จริงของคุณ หรือใช้ Petstore ทดสอบ
+          # ดึง Spec จากต้นทาง (ปรับ URL ตามจริง)
           curl -fsSL https://petstore.swagger.io/v2/swagger.json -o swagger.json
 
       - name: Register API to IBM APIGW
         id: register-api
         uses: jiridj/wm-apigw-actions-register-api@v1
         with:
-          apigw-url: http://20.198.251.142:5555
+          apigw-url: "http://20.198.251.142:5555"
           apigw-username: ${{ secrets.APIGW_USERNAME }}
           apigw-password: ${{ secrets.APIGW_PASSWORD }}
           api-spec: swagger.json
@@ -36,25 +43,45 @@ jobs:
         if: success()
         run: |
           API_ID="${{ steps.register-api.outputs.api-id }}"
-          echo "Applying Policy to API ID: $API_ID"
+          echo "Applying Policy: ${{ env.POLICY_TEMPLATE_ID }} to API ID: $API_ID"
           
-          # ใช้ PUT เพื่อเชื่อมโยง Policy Template กับ API
-          # หมายเหตุ: 'Policy_1' ต้องมีอยู่แล้วในระบบ APIGW
-          curl -i -X PUT \
-            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+          # ส่ง Request พร้อมตรวจสอบ HTTP Status Code (-w %{http_code})
+          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            -X PUT \
             -H "Content-Type: application/json" \
-            -d "{\"templateId\": \"Policy_1\"}" \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}/policy-templates"
+            -d "{\"templateId\": \"${{ env.POLICY_TEMPLATE_ID }}\"}" \
+            -w "|%{http_code}" \
+            "${{ env.APIGW_BASE_URL }}/apis/${API_ID}/policy-templates")
 
-      - name: Verify API Status
+          HTTP_STATUS=$(echo "$RESPONSE" | awk -F'|' '{print $2}')
+          
+          if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "201" ]]; then
+            echo "❌ Failed to apply policy. Status: $HTTP_STATUS"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Policy applied successfully."
+
+      - name: Verify API Status & Health
+        if: success()
         run: |
           API_ID="${{ steps.register-api.outputs.api-id }}"
-          echo "Checking status for API: $API_ID"
           
-          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
+          # ดึงข้อมูล API มาเช็คด้วย jq
+          API_DATA=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "${{ env.APIGW_BASE_URL }}/apis/${API_ID}")
           
-          echo "API Details: $RESPONSE"
-          
-          # ตรวจสอบว่า API Active หรือไม่ (ใช้ jq ถ้าติดตั้งไว้)
-          # echo $RESPONSE | jq '.isActive'
+          # ตรวจสอบว่า API Active จริงหรือไม่ (Path ใน JSON ของ IBM มักจะเป็น .api.isActive)
+          IS_ACTIVE=$(echo "$API_DATA" | jq -r '.api.isActive // .isActive')
+          API_NAME=$(echo "$API_DATA" | jq -r '.api.apiName // .apiName')
+
+          echo "--------------------------------------"
+          echo "API Name: $API_NAME"
+          echo "API Status Active: $IS_ACTIVE"
+          echo "--------------------------------------"
+
+          if [ "$IS_ACTIVE" != "true" ]; then
+            echo "❌ Error: API is registered but NOT active!"
+            exit 1
+          fi
+          echo "🚀 Deployment Verified: API is up and running."
