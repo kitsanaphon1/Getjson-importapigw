@@ -12,19 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: development
+
     steps:
       - uses: actions/checkout@v4
 
-      # 1. ดึง Spec จาก FastAPI (หรือ Petstore ตามตัวอย่างเดิม)
-      - name: Fetch OpenAPI Spec
+      - name: Fetch OpenAPI Spec from FastAPI
         run: |
           curl -s https://petstore.swagger.io/v2/swagger.json -o swagger.json
           ls -l swagger.json
 
-      # 2. Register API เข้า Gateway
       - name: Register API to IBM APIGW
+        id: register-api
         uses: jiridj/wm-apigw-actions-register-api@v1
-        with: 
+        with:
           apigw-url: http://20.198.251.142:5555
           apigw-username: ${{ secrets.APIGW_USERNAME }}
           apigw-password: ${{ secrets.APIGW_PASSWORD }}
@@ -32,48 +32,23 @@ jobs:
           set-active: true
           debug: true
 
-      # 3. จัดการเรื่อง Policy (หา ID -> เข้า Group -> Activate)
-      - name: Assign Policy_1 Group
+      # ขั้นตอนใหม่: apply policy template "Policy_1"
+      - name: Apply policy template Policy_1
         run: |
-          # 1. เตรียมชื่อ API
-          RAW_NAME=$(jq -r '.info.title' swagger.json)
-          ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RAW_NAME'))")
-          
-          echo "🔍 Searching for API: $RAW_NAME"
+          echo "API ID = ${{ steps.register-api.outputs.api-id }}"
 
-          # 2. ค้นหา ID (เพิ่ม -H "Accept: application/json" บังคับให้ตอบเป็น JSON)
-          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Accept: application/json" \
-            "http://20.198.251.142:5555/rest/apigateway/apis?apiName=$ENCODED_NAME")
-          
-          echo "--- Gateway Response Start ---"
-          echo "$RESPONSE"
-          echo "--- Gateway Response End ---"
+          # ตัวอย่างแนวทาง:
+          # 1) หา policy template id จากชื่อ Policy_1
+          # 2) apply template ให้กับ api-id ที่เพิ่ง register
+          #
+          # NOTE:
+          # endpoint และ payload อาจต่างกันตาม version ของ webMethods API Gateway
+          # ต้องอิง REST API ของ instance ที่คุณใช้อยู่
 
-          # ตรวจสอบว่า Response เป็น JSON หรือไม่
-          if ! echo "$RESPONSE" | jq empty > /dev/null 2>&1; then
-            echo "❌ Error: Response is not JSON. Likely HTML Error or Wrong Port."
-            exit 1
-          fi
-
-          # ดึง ID ออกมาจาก JSON
-          API_ID=$(echo "$RESPONSE" | jq -r '.apiSummaries[0].id // empty')
-
-          if [ -z "$API_ID" ] || [ "$API_ID" == "null" ]; then
-            echo "❌ Error: API ID not found for '$RAW_NAME'."
-            exit 1
-          fi
-
-          echo "✅ Found API ID: $API_ID. Linking to Group: Policy_1"
-
-          # 3. นำเข้า Group (เติม Accept Header ไว้ด้วยเพื่อความชัวร์)
-          curl -s -X POST "http://20.198.251.142:5555/rest/apigateway/groups/Policy_1/apis" \
-            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Accept: application/json" \
+          curl -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
             -H "Content-Type: application/json" \
-            -d "[\"$API_ID\"]"
-
-          # 4. Activate API
-          curl -s -X POST "http://20.198.251.142:5555/rest/apigateway/apis/$API_ID/activate" \
-            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Accept: application/json"
+            -X POST \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${{ steps.register-api.outputs.api-id }}/policytemplates/apply" \
+            -d '{
+              "policyTemplateName": "Policy_1"
+            }'
