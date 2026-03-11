@@ -37,10 +37,17 @@ jobs:
           echo "API ID = ${{ steps.register-api.outputs.api-id }}"
           echo "Policy template target = Policy_1"
 
-      # ยังไม่ apply template อัตโนมัติ เพราะ endpoint ที่ถูกต้องของ instance นี้
-      # ยังไม่ได้ยืนยันจาก official doc/API spec
-      # ถ้าใส่ endpoint เดาผิด จะโดนตีความเป็น create API และ fail เหมือนเดิม
-      - name: Skip policy template apply for now
+      - name: Debug policy template endpoints
+        continue-on-error: true
         run: |
-          echo "Skipped auto-apply policy template Policy_1"
-          echo "Reason: official apply-template REST endpoint for this APIGW instance/version is not yet confirmed"
+          API_ID="${{ steps.register-api.outputs.api-id }}"
+          echo "API ID = $API_ID"
+
+          echo "=== Try list policy templates ==="
+          curl -i -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/policy-templates"
+
+          echo
+          echo "=== Try get API details ==="
+          curl -i -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}"
