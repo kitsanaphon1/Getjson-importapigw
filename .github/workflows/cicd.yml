@@ -16,10 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch OpenAPI Spec from FastAPI
+      - name: Fetch OpenAPI Spec
         run: |
+          # เปลี่ยนเป็น URL ของ FastAPI จริงของคุณ หรือใช้ Petstore ทดสอบ
           curl -fsSL https://petstore.swagger.io/v2/swagger.json -o swagger.json
-          ls -l swagger.json
 
       - name: Register API to IBM APIGW
         id: register-api
@@ -32,22 +32,29 @@ jobs:
           set-active: true
           debug: true
 
-      - name: Show registered API info
-        run: |
-          echo "API ID = ${{ steps.register-api.outputs.api-id }}"
-          echo "Policy template target = Policy_1"
-
-      - name: Debug policy template endpoints
-        continue-on-error: true
+      - name: Apply Policy Template
+        if: success()
         run: |
           API_ID="${{ steps.register-api.outputs.api-id }}"
-          echo "API ID = $API_ID"
+          echo "Applying Policy to API ID: $API_ID"
+          
+          # ใช้ PUT เพื่อเชื่อมโยง Policy Template กับ API
+          # หมายเหตุ: 'Policy_1' ต้องมีอยู่แล้วในระบบ APIGW
+          curl -i -X PUT \
+            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"templateId\": \"Policy_1\"}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}/policy-templates"
 
-          echo "=== Try list policy templates ==="
-          curl -i -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            "http://20.198.251.142:5555/rest/apigateway/policy-templates"
-
-          echo
-          echo "=== Try get API details ==="
-          curl -i -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}"
+      - name: Verify API Status
+        run: |
+          API_ID="${{ steps.register-api.outputs.api-id }}"
+          echo "Checking status for API: $API_ID"
+          
+          RESPONSE=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
+            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
+          
+          echo "API Details: $RESPONSE"
+          
+          # ตรวจสอบว่า API Active หรือไม่ (ใช้ jq ถ้าติดตั้งไว้)
+          # echo $RESPONSE | jq '.isActive'
