@@ -1,29 +1,20 @@
-name: cicd
-
-on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-
 jobs:
   update-dev:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: development
+    strategy:
+      matrix:
+        # ใส่ URL ทั้งหมดตรงนี้
+        api_url: [
+          "https://petstore.swagger.io/v2/swagger.json",
+          "https://api.apis.guru/v2/specs/instagram.com/1.0.0/swagger.json",
+          "https://api.apis.guru/v2/specs/azure.com/storage/2019-06-01/swagger.json"
+          # ... เพิ่มให้ครบ
+        ]
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch Spec
+        run: curl -s ${{ matrix.api_url }} -o swagger.json
 
-      # ขั้นตอนที่ 1: ไปดึง Spec จาก FastAPI Server ของคุณ
-      - name: Fetch OpenAPI Spec from FastAPI
-        run: |
-          curl -s https://petstore.swagger.io/v2/swagger.json -o swagger.json
-          ls -l swagger.json
-
-      # ขั้นตอนที่ 2: Import เข้า API Gateway
-      - name: Register API to APIGW
-        id: register-api # 🔴 สำคัญมาก! ต้องมี id นี้ เพื่อให้ Step ต่อไปดึงค่า API_ID ไปใช้ได้
+      - name: Register API to IBM APIGW
         uses: jiridj/wm-apigw-actions-register-api@v1
         with: 
           apigw-url: http://20.198.251.142:5555
@@ -31,66 +22,3 @@ jobs:
           apigw-password: ${{ secrets.APIGW_PASSWORD }}
           api-spec: swagger.json
           set-active: true
-          debug: true
-
-      # ขั้นตอนที่ 3: เอา API ที่ได้ไปผูกกับ Policy Template
-      - name: Apply Policy Template
-        if: success()
-        run: |
-          # 1. ดึง ID มาจาก Step ที่แล้ว
-          API_ID="${{ steps.register-api.outputs.api-id }}"
-          
-          if [ -z "$API_ID" ] || [ "$API_ID" == "null" ]; then
-            echo "❌ Error: API_ID is empty! Action register-api might not have returned an ID."
-            exit 1
-          fi
-          
-          echo "✅ Applying Policy to API ID: $API_ID"
-          
-          # 2. ค้นหา Internal ID ของ Policy_1 จาก Gateway
-          echo "🔍 Looking up internal ID for 'Policy_1'..."
-          POLICY_RES=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Accept: application/json" \
-            "http://20.198.251.142:5555/rest/apigateway/policyTemplates")
-            
-          # 🚀 ใช้ jq แบบ Deep Search ควานหา .name == "Policy_1" ในทุกระดับชั้นของ JSON
-          POLICY_ID=$(echo "$POLICY_RES" | jq -r '.. | objects | select(.name? == "Policy_1") | .id' | grep -v "null" | head -n 1)
-          
-          if [ -z "$POLICY_ID" ]; then
-            echo "❌ Error: Policy ID not found for 'Policy_1'."
-            echo "--- 🔍 นี่คือข้อมูลทั้งหมดที่ API Gateway ตอบกลับมา (ดูกันชัดๆ ว่ามี Policy_1 อยู่ไหม) ---"
-            echo "$POLICY_RES" | jq . || echo "$POLICY_RES"
-            exit 1
-          fi
-          echo "✅ Found Policy ID: $POLICY_ID"
-          
-          # 3. ดึงข้อมูล API ปัจจุบันออกมา
-          API_JSON=$(curl -s -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Accept: application/json" \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
-            
-          if ! echo "$API_JSON" | jq . >/dev/null 2>&1; then
-            echo "❌ Error: API Gateway returned non-JSON response."
-            echo "Raw Response: $API_JSON"
-            exit 1
-          fi
-
-          # 4. แทรก Policy Template ID เข้าไปในตำแหน่ง .api.policyTemplates
-          UPDATED_JSON=$(echo "$API_JSON" | jq --arg pid "$POLICY_ID" '.api.policyTemplates = (.api.policyTemplates // []) + [{"id": $pid}]')
-          
-          # 5. อัปเดตกลับไปที่ Gateway
-          HTTP_STATUS=$(curl -s -o put_response.json -w "%{http_code}" -X PUT \
-            -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            -d "$UPDATED_JSON" \
-            "http://20.198.251.142:5555/rest/apigateway/apis/${API_ID}")
-
-          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            echo "🎉 Policy Applied Successfully! (HTTP $HTTP_STATUS)"
-          else
-            echo "❌ Failed to Apply Policy. HTTP Status: $HTTP_STATUS"
-            echo "🔍 Error Details from Gateway:"
-            cat put_response.json | jq . || cat put_response.json
-            exit 1
-          fi
