@@ -7,10 +7,7 @@ https://api.apis.guru/v2/specs/instagram.com/1.0.0/swagger.json
 https://petstore3.swagger.io/api/v3/openapi.json
 https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json
 https://raw.githubusercontent.com/box/box-openapi/master/openapi.json
-https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json
-https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
 https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/main/openapi/checkout_orders_v2.json
-https://raw.githubusercontent.com/digitalocean/openapi/main/specification/DigitalOcean-public.v2.yaml
 https://api.apis.guru/v2/specs/spotify.com/1.0.0/openapi.json
 https://api.apis.guru/v2/specs/zoom.us/2.0.0/openapi.json
 https://api.apis.guru/v2/specs/1password.com/events/1.0.0/openapi.json
