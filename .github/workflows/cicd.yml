@@ -8,33 +8,46 @@ on:
       - 'v*'
 
 jobs:
-  update-dev:
+  # --- Job 1: อ่านไฟล์ api_list.txt และแปลงเป็นตัวแปร Matrix ---
+  prepare-matrix:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      # 1. Checkout โค้ดเพื่อให้อ่านไฟล์ api_list.txt ได้
       - uses: actions/checkout@v4
-
-      # 2. อ่านไฟล์และวนลูป
-      - name: Fetch and Register APIs from File
+      - name: Parse api_list.txt
+        id: set-matrix
         run: |
-          # วนลูปอ่านทีละบรรทัดจากไฟล์ api_list.txt
-          while IFS= read -r api_url || [ -n "$api_url" ]; do
-            
-            # ป้องกันกรณีเจอบรรทัดว่างให้ข้ามไป
-            if [ -z "$api_url" ]; then continue; fi
-            
-            echo "====================================="
-            echo "🚀 Processing API: $api_url"
-            
-            # โหลด Spec มาเก็บไว้ในไฟล์ swagger.json
-            curl -s "$api_url" -o swagger.json
-            
-            # ยิงไฟล์ swagger.json เข้า IBM API Gateway
-            curl -X POST "http://20.198.251.142:5555/rest/apigateway/apis" \
-              -u "${{ secrets.APIGW_USERNAME }}:${{ secrets.APIGW_PASSWORD }}" \
-              -H "Content-Type: application/json" \
-              -d @swagger.json
-              
-            echo "✅ Finished: $api_url"
-            
-          done < api_list.txt
+          # อ่านไฟล์ ลบบรรทัดว่าง รองรับ \r และแปลงเป็น JSON Array ให้ GitHub เข้าใจ
+          JSON_ARRAY=$(cat api_list.txt | tr -d '\r' | awk 'NF' | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix=$JSON_ARRAY" >> $GITHUB_OUTPUT
+
+  # --- Job 2: นำ Matrix ที่ได้มารัน Register ทีละตัว ---
+  update-dev:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # ถ้ามี URL ไหนพัง ให้รันตัวที่เหลือต่อไปจนจบ
+      max-parallel: 5 # ป้องกันการยิงเข้า IBM API Gateway พร้อมกันรัวเกินไป (ปรับเลขได้)
+      matrix:
+        api_url: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 1. โหลด Spec มาเก็บไว้ โดยรักษานามสกุลไฟล์เดิมไว้ (.json หรือ .yaml)
+      - name: Fetch API Spec
+        id: fetch-spec
+        run: |
+          curl -sLO "${{ matrix.api_url }}"
+          FILENAME=$(basename "${{ matrix.api_url }}")
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+
+      # 2. ใช้ Action ท่ามาตรฐานในการ Register
+      - name: Register API to IBM APIGW
+        uses: jiridj/wm-apigw-actions-register-api@v1
+        with: 
+          apigw-url: http://20.198.251.142:5555
+          apigw-username: ${{ secrets.APIGW_USERNAME }}
+          apigw-password: ${{ secrets.APIGW_PASSWORD }}
+          api-spec: ${{ steps.fetch-spec.outputs.filename }}
+          set-active: true
